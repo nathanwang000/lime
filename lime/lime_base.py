@@ -6,6 +6,7 @@ import sklearn
 import numpy as np
 from sklearn.linear_model import Ridge
 
+print("using lime eye version")
 
 class LimeBase(object):
     """Class for learning a locally linear sparse model from perturbed data"""
@@ -41,6 +42,27 @@ class LimeBase(object):
                                                           verbose=False)
         return alphas, coefs
 
+            
+    @staticmethod
+    def generate_enet_path(weighted_data, weighted_labels):
+        """Generates the lars path for weighted data.
+
+        Args:
+            weighted_data: data that has been weighted by kernel
+            weighted_label: labels, weighted by kernel
+
+        Returns:
+            (alphas, coefs), both are arrays corresponding to the
+            regularization parameter and coefficients, respectively
+        """
+        # eps = 1e-6
+        # alpha_max = 1
+        # n_alphas = 100
+        # alphas = np.logspace(np.log10(alpha_max * eps), np.log10(alpha_max), n_alphas)
+        alphas, coefs, _ = sklearn.linear_model.enet_path(weighted_data, 
+                                                          weighted_labels)
+        return alphas, coefs
+    
     @staticmethod
     def forward_selection(data, labels, weights, num_features):
         """Iteratively adds features to the model"""
@@ -63,9 +85,11 @@ class LimeBase(object):
             used_features.append(best)
         return np.array(used_features)
 
-    def feature_selection(self, data, labels, weights, num_features, method):
+    def feature_selection(self, data, labels, weights, num_features,
+                          method, known_features):
         """Selects features for the model. see explain_instance_with_data to
            understand the parameters."""
+        print("using method", method)
         if method == 'none':
             return np.array(range(data.shape[1]))
         elif method == 'forward_selection':
@@ -73,22 +97,50 @@ class LimeBase(object):
         elif method == 'highest_weights':
             clf = sklearn.linear_model.Ridge(alpha=0, fit_intercept=True)
             clf.fit(data, labels, sample_weight=weights)
+            # NOTE: here data[0] is an all ones array, so it doesn't matter
+            # also should be data.shape[1], but this works as long as n > num_features
             feature_weights = sorted(zip(range(data.shape[0]),
                                          clf.coef_ * data[0]),
                                      key=lambda x: np.abs(x[1]),
                                      reverse=True)
             return np.array([x[0] for x in feature_weights[:num_features]])
+        elif method == 'eye_path':
+            weighted_data = ((data - np.average(data, axis=0, weights=weights))
+                             * np.sqrt(weights[:, np.newaxis]))
+            weighted_labels = ((labels - np.average(labels, weights=weights))
+                               * np.sqrt(weights))
+            from . import eye_pytorch
+            # kf are risk_factors            
+            return eye_pytorch.eye_path(weighted_data, weighted_labels,
+                                        num_features, risk=known_features)
+
+
         elif method == 'lasso_path':
             weighted_data = ((data - np.average(data, axis=0, weights=weights))
                              * np.sqrt(weights[:, np.newaxis]))
             weighted_labels = ((labels - np.average(labels, weights=weights))
                                * np.sqrt(weights))
-            used_features = range(weighted_data.shape[1])
-            nonzero = range(weighted_data.shape[1])
-            _, coefs = self.generate_lars_path(weighted_data,
+            used_features = range(weighted_data.shape[1]) # initialized but not used
+            nonzero = range(weighted_data.shape[1]) # initialized but not used
+            alphas, coefs = self.generate_lars_path(weighted_data,
                                                weighted_labels)
             for i in range(len(coefs.T) - 1, 0, -1):
                 nonzero = coefs.T[i].nonzero()[0]
+                if len(nonzero) <= num_features:
+                    break
+            used_features = nonzero
+            return used_features
+
+        elif method == "enet_path":
+            weighted_data = ((data - np.average(data, axis=0, weights=weights))
+                             * np.sqrt(weights[:, np.newaxis]))
+            weighted_labels = ((labels - np.average(labels, weights=weights))
+                               * np.sqrt(weights))
+            alphas, coefs = self.generate_enet_path(weighted_data,
+                                               weighted_labels)
+            for i in range(len(coefs.T) - 1, 0, -1):
+                nonzero = coefs.T[i].nonzero()[0]
+                print("%.3e non_zero: %d" % (alphas[i], len(nonzero)))                
                 if len(nonzero) <= num_features:
                     break
             used_features = nonzero
@@ -108,7 +160,8 @@ class LimeBase(object):
                                    label,
                                    num_features,
                                    feature_selection='auto',
-                                   model_regressor=None):
+                                   model_regressor=None,
+                                   known_features=None):
         """Takes perturbed data, labels and distances, returns explanation.
 
         Args:
@@ -134,7 +187,7 @@ class LimeBase(object):
                 Defaults to Ridge regression if None. Must have
                 model_regressor.coef_ and 'sample_weight' as a parameter
                 to model_regressor.fit()
-
+            known_features: only used if feature_selection is 'eye_path'
         Returns:
             (intercept, exp, score):
             intercept is a float.
@@ -150,8 +203,10 @@ class LimeBase(object):
                                                labels_column,
                                                weights,
                                                num_features,
-                                               feature_selection)
+                                               feature_selection,
+                                               known_features=known_features)
 
+        # so it actually refit the model after get used_features
         if model_regressor is None:
             model_regressor = Ridge(alpha=1, fit_intercept=True)
         easy_model = model_regressor

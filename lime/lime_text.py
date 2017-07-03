@@ -93,7 +93,8 @@ class IndexedString(object):
                  according to position.
         """
         self.raw = raw_string
-        self.as_list = re.split(r'(%s)|$' % split_expression, self.raw)
+        # capturing here include the split string        
+        self.as_list = re.split(r'(%s)|$' % split_expression, self.raw) 
         self.as_np = np.array(self.as_list)
         non_word = re.compile(r'(%s)|$' % split_expression).match
         self.string_start = np.hstack(
@@ -220,7 +221,9 @@ class LimeTextExplainer(object):
                          num_features=10,
                          num_samples=5000,
                          distance_metric='cosine',
-                         model_regressor=None):
+                         model_regressor=None,
+                         known_features=None,
+                         C=None): 
         """Generates explanations for a prediction.
 
         First, we generate neighborhood data by randomly hiding features from
@@ -243,8 +246,10 @@ class LimeTextExplainer(object):
             distance_metric: the distance metric to use for sample weighting,
                 defaults to cosine similarity
             model_regressor: sklearn regressor to use in explanation. Defaults
-            to Ridge regression in LimeBase. Must have model_regressor.coef_
-            and 'sample_weight' as a parameter to model_regressor.fit()
+                to Ridge regression in LimeBase. Must have model_regressor.coef_
+                and 'sample_weight' as a parameter to model_regressor.fit()
+            known_features: only used for 'eye_path'
+            C: correlation matrix used to perturb the input
         Returns:
             An Explanation object (see explanation.py) with the corresponding
             explanations.
@@ -254,7 +259,10 @@ class LimeTextExplainer(object):
         domain_mapper = TextDomainMapper(indexed_string)
         data, yss, distances = self.__data_labels_distances(
             indexed_string, classifier_fn, num_samples,
-            distance_metric=distance_metric)
+            distance_metric=distance_metric,
+            C=C)
+        if known_features:
+            known_features = self._get_risk_factors(indexed_string, known_features)
         if self.class_names is None:
             self.class_names = [str(x) for x in range(yss[0].shape[0])]
         ret_exp = explanation.Explanation(domain_mapper=domain_mapper,
@@ -268,9 +276,10 @@ class LimeTextExplainer(object):
             (ret_exp.intercept[label],
              ret_exp.local_exp[label],
              ret_exp.score) = self.base.explain_instance_with_data(
-                data, yss, distances, label, num_features,
-                model_regressor=model_regressor,
-                feature_selection=self.feature_selection)
+                 data, yss, distances, label, num_features,
+                 model_regressor=model_regressor,
+                 feature_selection=self.feature_selection,
+                 known_features=known_features)
         return ret_exp
 
     @classmethod
@@ -278,7 +287,8 @@ class LimeTextExplainer(object):
                                 indexed_string,
                                 classifier_fn,
                                 num_samples,
-                                distance_metric='cosine'):
+                                distance_metric='cosine',
+                                C=None):
         """Generates a neighborhood around a prediction.
 
         Generates neighborhood data by randomly removing words from
@@ -292,8 +302,8 @@ class LimeTextExplainer(object):
             num_samples: size of the neighborhood to learn the linear model
             distance_metric: the distance metric to use for sample weighting,
                 defaults to cosine similarity
-
-
+            C: correlation matrix used to perturb input
+           
         Returns:
             A tuple (data, labels, distances), where:
                 data: dense num_samples * K binary matrix, where K is the
@@ -310,6 +320,20 @@ class LimeTextExplainer(object):
             return sklearn.metrics.pairwise.pairwise_distances(
                 x, x[0], metric=distance_metric).ravel() * 100
 
+        def genCovX(C, n):
+            # C is the covariance matrice (assume to be psd)
+            # n is number of examples
+            # if C is None: return np.random.randint(2, size=(n, d)) * 2 / np.sqrt(n)
+            d, _ = C.shape
+            # Z = np.random.randint(2, size=(n, d)) * 2 / sqrt(n)
+            Z = np.random.randn(n,d) / np.sqrt(n)
+            A = np.linalg.cholesky(C)
+            X = Z.dot(A.T)
+            # let's translate and normalize to have a probability
+            X -= X.min()
+            X /= X.max()
+            return np.random.binomial(1, X)
+        
         doc_size = indexed_string.num_words()
         sample = np.random.randint(1, doc_size + 1, num_samples - 1)
         data = np.ones((num_samples, doc_size))
@@ -323,3 +347,19 @@ class LimeTextExplainer(object):
         labels = classifier_fn(inverse_data)
         distances = distance_fn(sp.sparse.csr_matrix(data))
         return data, labels, distances
+
+    def _get_risk_factors(self, indexed_string, known_features):
+        import torch
+        import torch.nn as nn
+        from torch.autograd import Variable
+        doc_size = indexed_string.num_words()
+        risk = torch.zeros(doc_size)
+        indices = []
+        for i, w in enumerate(indexed_string.inverse_vocab):
+            if w in known_features:
+                indices.append(i)
+        risk.numpy()[indices] = 1
+        #print("known factors are ", risk)
+        return Variable(risk, requires_grad=False)         
+
+    
