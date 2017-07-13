@@ -86,7 +86,7 @@ class LimeBase(object):
         return np.array(used_features)
 
     def feature_selection(self, data, labels, weights, num_features,
-                          method, known_features):
+                          method, risk=None):
         """Selects features for the model. see explain_instance_with_data to
            understand the parameters."""
         print("using method", method)
@@ -112,7 +112,7 @@ class LimeBase(object):
             from . import eye_pytorch
             # kf are risk_factors            
             return eye_pytorch.eye_path(weighted_data, weighted_labels,
-                                        num_features, risk=known_features)
+                                        num_features, risk=risk)
 
 
         elif method == 'lasso_path':
@@ -161,7 +161,7 @@ class LimeBase(object):
                                    num_features,
                                    feature_selection='auto',
                                    model_regressor=None,
-                                   known_features=None):
+                                   risk=None):
         """Takes perturbed data, labels and distances, returns explanation.
 
         Args:
@@ -187,7 +187,7 @@ class LimeBase(object):
                 Defaults to Ridge regression if None. Must have
                 model_regressor.coef_ and 'sample_weight' as a parameter
                 to model_regressor.fit()
-            known_features: only used if feature_selection is 'eye_path'
+            risk: risk factor vector, only used if feature_selection is 'eye_path'
         Returns:
             (intercept, exp, score):
             intercept is a float.
@@ -204,7 +204,7 @@ class LimeBase(object):
                                                weights,
                                                num_features,
                                                feature_selection,
-                                               known_features=known_features)
+                                               risk=risk)
 
         # so it actually refit the model after get used_features
         if model_regressor is None:

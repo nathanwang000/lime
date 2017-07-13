@@ -149,7 +149,7 @@ class LimeTabularExplainer(object):
             else:
                 raise ValueError('''Discretizer must be 'quartile',''' +
                                  ''' 'decile' or 'entropy' ''')
-            self.categorical_features = range(training_data.shape[1])
+            self.categorical_features = range(training_data.shape[1]) # so all categorical by the end!
             discretized_training_data = self.discretizer.discretize(
                 training_data)
 
@@ -173,9 +173,10 @@ class LimeTabularExplainer(object):
         for feature in self.categorical_features:
             feature_count = collections.defaultdict(lambda: 0.0)
             column = training_data[:, feature]
+            # this is for continuously converted categorical data
             if self.discretizer is not None:
                 column = discretized_training_data[:, feature]
-                feature_count[0] = 0.
+                feature_count[0] = 0.  # only handles quantile? or useless?
                 feature_count[1] = 0.
                 feature_count[2] = 0.
                 feature_count[3] = 0.
@@ -185,12 +186,13 @@ class LimeTabularExplainer(object):
             self.feature_values[feature] = values
             self.feature_frequencies[feature] = (np.array(frequencies) /
                                                  sum(frequencies))
-            self.scaler.mean_[feature] = 0
+            self.scaler.mean_[feature] = 0 # not scaled for categorical data
             self.scaler.scale_[feature] = 1
 
     def explain_instance(self, data_row, classifier_fn, labels=(1,),
                          top_labels=None, num_features=10, num_samples=5000,
-                         distance_metric='euclidean', model_regressor=None):
+                         distance_metric='euclidean', model_regressor=None,
+                         known_features=None):
         """Generates explanations for a prediction.
 
         First, we generate neighborhood data by randomly perturbing features
@@ -218,6 +220,9 @@ class LimeTabularExplainer(object):
             An Explanation object (see explanation.py) with the corresponding
             explanations.
         """
+        # so the data here is already binary for categorical data
+        # so 1 if in the same category, 0 otherwise
+        # inverse is the undiscretized data matrix
         data, inverse = self.__data_inverse(data_row, num_samples)
         scaled_data = (data - self.scaler.mean_) / self.scaler.scale_
 
@@ -236,10 +241,13 @@ class LimeTabularExplainer(object):
         if feature_names is None:
             feature_names = [str(x) for x in range(data_row.shape[0])]
 
+        if known_features:
+            known_features = self._get_risk_factors(known_features, feature_names)
+
         values = ['%.2f' % a for a in data_row]
         for i in self.categorical_features:
             if self.discretizer is not None and i in self.discretizer.lambdas:
-                continue
+                continue # this is for continously converted categories
             name = int(data_row[i])
             if i in self.categorical_names:
                 name = self.categorical_names[i][name]
@@ -272,7 +280,8 @@ class LimeTabularExplainer(object):
              ret_exp.score) = self.base.explain_instance_with_data(
                 scaled_data, yss, distances, label, num_features,
                 model_regressor=model_regressor,
-                feature_selection=self.feature_selection)
+                feature_selection=self.feature_selection,
+                risk=known_features)
         return ret_exp
 
     def __data_inverse(self,
@@ -300,7 +309,7 @@ class LimeTabularExplainer(object):
                 binary, but categorical (as the original data)
         """
         data = np.zeros((num_samples, data_row.shape[0]))
-        categorical_features = range(data_row.shape[0])
+        categorical_features = range(data_row.shape[0]) # oh: so all discretized features becomes categorical features
         if self.discretizer is None:
             data = np.random.normal(
                 0, 1, num_samples * data_row.shape[0]).reshape(
@@ -328,6 +337,17 @@ class LimeTabularExplainer(object):
         inverse[0] = data_row
         return data, inverse
 
+    def _get_risk_factors(self, known_features, feature_names):
+        import torch
+        import torch.nn as nn
+        from torch.autograd import Variable
+
+        risk = torch.zeros(len(feature_names))
+        for i, n in enumerate(feature_names):
+            if n in known_features:
+                risk[i] = 1
+        #print("known factors are ", risk)
+        return Variable(risk, requires_grad=False)         
 
 class RecurrentTabularExplainer(LimeTabularExplainer):
     """

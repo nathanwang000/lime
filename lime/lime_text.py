@@ -279,7 +279,7 @@ class LimeTextExplainer(object):
                  data, yss, distances, label, num_features,
                  model_regressor=model_regressor,
                  feature_selection=self.feature_selection,
-                 known_features=known_features)
+                 risk=known_features)
         return ret_exp
 
     @classmethod
