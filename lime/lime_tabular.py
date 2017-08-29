@@ -9,6 +9,10 @@ import numpy as np
 import sklearn
 import sklearn.preprocessing
 
+from sklearn.neighbors import KernelDensity
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import StandardScaler
+
 from lime.discretize import QuartileDiscretizer
 from lime.discretize import DecileDiscretizer
 from lime.discretize import EntropyDiscretizer
@@ -96,6 +100,7 @@ class LimeTabularExplainer(object):
                  categorical_features=None, categorical_names=None,
                  kernel_width=None, verbose=False, class_names=None,
                  feature_selection='auto', discretize_continuous=True,
+                 proposal_method="random", # random proposal vs. kde proposal
                  discretizer='quartile'):
         """Init function.
 
@@ -126,6 +131,25 @@ class LimeTabularExplainer(object):
             discretizer: only matters if discretize_continuous is True. Options
                 are 'quartile', 'decile' or 'entropy'
         """
+        #### jiaxuan's addition for kde proposing distribution ####
+        self.proposal_method = proposal_method
+        # standardize data
+        X_train = training_data
+        self.kde_scaler = StandardScaler()
+        X_train = self.kde_scaler.fit_transform(X_train)
+
+        # learn a kde classifier
+        # use grid search cross-validation to optimize the bandwidth
+        params = {'bandwidth': np.logspace(-1, 1, 20)}
+        grid = GridSearchCV(KernelDensity(), params)
+        grid.fit(X_train)
+
+        print("best bandwidth: {0}".format(grid.best_estimator_.bandwidth))
+
+        # use the best estimator to compute the kernel density estimate
+        self.kde = grid.best_estimator_        
+        #### end jiaxuan's addition ########
+        
         self.categorical_names = categorical_names
         self.categorical_features = categorical_features
         if self.categorical_names is None:
@@ -223,14 +247,30 @@ class LimeTabularExplainer(object):
         # so the data here is already binary for categorical data
         # so 1 if in the same category, 0 otherwise
         # inverse is the undiscretized data matrix
-        data, inverse = self.__data_inverse(data_row, num_samples)
+        # todo: change bandwidth to cross validated bandwidth        
+        # was __data_inverse instead of data_inverse2
+        if self.proposal_method == 'kde':
+            print("using kde proposal, not suitable for categorical data!!!")
+            data, inverse = self.__data_inverse2(data_row, num_samples)
+        else:
+            data, inverse = self.__data_inverse(data_row, num_samples)            
+
         scaled_data = (data - self.scaler.mean_) / self.scaler.scale_
 
-        distances = sklearn.metrics.pairwise_distances(
-            scaled_data,
-            scaled_data[0].reshape(1, -1),
-            metric=distance_metric
-        ).ravel()
+        if self.proposal_method == 'kde':
+            # so the distance is in original space
+            distances = sklearn.metrics.pairwise_distances(
+                inverse,
+                inverse[0].reshape(1, -1),
+                metric='euclidean'
+            ).ravel()            
+        else:
+            # so the distance is on binary features
+            distances = sklearn.metrics.pairwise_distances(
+                scaled_data,
+                scaled_data[0].reshape(1, -1),
+                metric=distance_metric
+            ).ravel()
 
         yss = classifier_fn(inverse)
         if self.class_names is None:
@@ -282,6 +322,10 @@ class LimeTabularExplainer(object):
                 model_regressor=model_regressor,
                 feature_selection=self.feature_selection,
                 risk=known_features)
+
+        ret_exp.perturbed_original = inverse
+        ret_exp.perturbed_binary = data
+        ret_exp.discretizer = self.discretizer
         return ret_exp
 
     def __data_inverse(self,
@@ -308,6 +352,7 @@ class LimeTabularExplainer(object):
                 inverse: same as data, except the categorical features are not
                 binary, but categorical (as the original data)
         """
+        # data_row is in original space        
         data = np.zeros((num_samples, data_row.shape[0]))
         categorical_features = range(data_row.shape[0]) # oh: so all discretized features becomes categorical features
         if self.discretizer is None:
@@ -328,7 +373,7 @@ class LimeTabularExplainer(object):
                                               replace=True, p=freqs)
             binary_column = np.array([1 if x == first_row[column]
                                       else 0 for x in inverse_column])
-            binary_column[0] = 1
+            binary_column[0] = 1 # the first row is the original data so 1
             inverse_column[0] = data[0, column]
             data[:, column] = binary_column
             inverse[:, column] = inverse_column
@@ -336,6 +381,53 @@ class LimeTabularExplainer(object):
             inverse[1:] = self.discretizer.undiscretize(inverse[1:])
         inverse[0] = data_row
         return data, inverse
+
+    def __data_inverse2(self,
+                        data_row,
+                        num_samples):
+        """Generates a neighborhood around a prediction.
+
+        For numerical features, perturb them by sampling from a Normal(0,1) and
+        doing the inverse operation of mean-centering and scaling, according to
+        the means and stds in the training data. For categorical features,
+        perturb by sampling according to the training distribution, and making
+        a binary feature that is 1 when the value is the same as the instance
+        being explained.
+
+        Args:
+            data_row: 1d numpy array, corresponding to a row
+            num_samples: size of the neighborhood to learn the linear model
+
+        Returns:
+            A tuple (data, inverse), where:
+                data: dense num_samples * K matrix, where categorical features
+                are encoded with either 0 (not equal to the corresponding value
+                in data_row) or 1. The first row is the original instance.
+                inverse: same as data, except the categorical features are not
+                binary, but categorical (as the original data)
+        """
+        ######## jiaxuan's addition ################
+
+        new_X = self.kde.sample(num_samples)
+
+        # todo: use nearest neighbor before kde to sample local points
+        
+        # transform back
+        inverse = self.kde_scaler.inverse_transform(new_X)
+        inverse[0] = data_row
+
+        # convert inverse to data
+        data = self.discretizer.discretize(inverse)
+
+        categorical_features = range(data_row.shape[0])
+        for column in categorical_features:
+            binary_column = np.array([1 if x == data[0,column]
+                                      else 0 for x in data[:,column]])
+            data[:, column] = binary_column
+        ############################################
+
+        return data, inverse
+    
 
     def _get_risk_factors(self, known_features, feature_names):
         import torch

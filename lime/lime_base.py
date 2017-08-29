@@ -113,8 +113,9 @@ class LimeBase(object):
             # kf are risk_factors            
             return eye_pytorch.eye_path(weighted_data, weighted_labels,
                                         num_features, risk=risk)
-
-
+        elif method == 'credaboost':
+            # todo
+            pass
         elif method == 'lasso_path':
             weighted_data = ((data - np.average(data, axis=0, weights=weights))
                              * np.sqrt(weights[:, np.newaxis]))

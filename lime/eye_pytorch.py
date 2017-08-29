@@ -4,6 +4,7 @@ from torch.autograd import Variable
 from torch import optim
 import torch.nn.functional as F
 import numpy as np
+import math
 
 # the linear model in pytorch (caution, this is not logistic regression because target is continous)
 def getModel(indim):
@@ -45,11 +46,13 @@ def eye_loss(loss, alpha, r=None): # loss is the data loss
 
     def eye(x):
         nonlocal r # default to all unknown
-        r = r or Variable(torch.zeros(x.numel()), requires_grad=False)
+        if r is None:
+            r = Variable(torch.zeros(x.numel()), requires_grad=False)
         # r = Variable(torch.ones(x.numel()), requires_grad=False)
         l1 = torch.abs(x * (1-r)).sum()
         # l1 = ((1-r) * x).norm(1)
-        l2sq = (r * x).dot(r * x)
+        l2sq = ((r*x) * (r*x)).sum()
+        # l2sq = (r * x).dot(r * x)
         return  l1 + torch.sqrt(l1**2 + l2sq)
 
     def mEYE(x):
@@ -70,18 +73,17 @@ def fit(X, y, alpha=0.01, risk=None):
     loss = eye_loss(torch.nn.MSELoss(size_average=True), alpha=alpha, r=risk)
     batch_size = 100
 
-    for i in range(30): # 100 epochs # todo: change this
+    for i in range(30): # was 100 epochs
         X, y = unison_shuffled_copies(X, y)
         cost = 0.
-        num_batches = int(np.floor(n_examples / batch_size))
+        num_batches = math.ceil(n_examples / batch_size)
         for k in range(num_batches):
-            start, end = k * batch_size, (k + 1) * batch_size
+            start, end = k * batch_size, min((k + 1) * batch_size, n_examples)
             cost += train(model, loss, optimizer, X[start:end], y[start:end])
-        #predY = predict(model, X)
-        # print("Epoch %d, cost = %f" % (i + 1, cost / num_batches))
-    print("Epoch %d, cost = %f" % (i + 1, cost / num_batches))
+            
+    # print("Epoch %d, train loss = %f" % (i + 1, cost / num_batches))
     ret = model.weight.data.numpy()[0]
-    ret[np.abs(ret) < np.max(np.abs(ret)) * 1e-2] = 0
+    ret[np.abs(ret) < np.max(np.abs(ret)) * 1e-2] = 0 # set too small weight to 0
     return ret
 
 # eye_path to select at most k features
@@ -107,7 +109,7 @@ def eye_path(X, y, num_features, n_alphas=60, risk=None): # n_alphas was 30
         if len(nonzero) <= num_features:
             break
     if len(nonzero) > num_features:
-        # choose the highest weights, todo: figure out what to do with differnet scale
+        # choose the highest weights if too little non zeros
         feature_weights = sorted(zip(range(best_c.size), best_c),
                                  key=lambda x: np.abs(x[1]), reverse=True)
         return np.array([x[0] for x in feature_weights[:num_features]])
